@@ -32,7 +32,7 @@ int main(void) {
         exit(1);
     }
 
-    /* Write the student name "AnishKKat" to dataB */
+    /* Write the student name to dataB */
     fwrite(studentName, 1, nameLength, filePtr);
     fputc('\0', filePtr); /* null terminator */
 

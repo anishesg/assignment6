@@ -16,7 +16,7 @@
   - main does not accept command-line arguments.
   - main does not read from stdin or any other input stream.
   - main does not write to stdout or stderr.
-  - main writes a crafted sequence of bytes to a file named "dataAplus".
+  - main writes a sequence of bytes to "dataAplus".
   - main returns 0 upon successful completion.
 */
 
