@@ -96,8 +96,6 @@ int main(void) {
        causing execution to jump into our injected instructions. */
     fwrite(&ulCurrentAddr, sizeof(unsigned long), 1, pFile);
 
-    /* write an EOF char at the end - not a newline. this ensures no '\n' in data */
-    fputc(EOF, pFile);
 
     fclose(pFile);
     return 0;
