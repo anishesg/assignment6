@@ -134,4 +134,7 @@ int main(void) {
 
     /* Write EOF to finalize */
     fputc(EOF, fp);
-   
+    fclose(fp);
+
+    return 0;
+}
